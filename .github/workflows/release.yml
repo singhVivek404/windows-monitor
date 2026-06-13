@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*' # Triggers on version tags (e.g., v1.0.0, v1.2.0-beta)
+  workflow_dispatch: # Allows manual execution from the GitHub Actions tab
 
 permissions:
   contents: write
