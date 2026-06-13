@@ -1,0 +1,37 @@
+.vscode/
+.vs/
+.idea/
+
+# Build outputs
+bin/
+obj/
+**/bin/
+**/obj/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Machine-specific collector outputs and reports (do not commit)
+Data/
+Reports/report.json
+Reports/*.log
+Logs/
+
+# NuGet / package artifacts
+packages/
+*.nupkg
+project.lock.json
+artifacts/
+
+# Misc
+*.log
