@@ -33,21 +33,18 @@ Standard diagnostics tools (like Windows Task Manager or Resource Monitor) only 
 
 ## 3. How to Use It
 
-### Option A — Install via Windows Installer (Recommended for Users)
+### Install via Windows Installer (Recommended)
 The compiled installer executable (`WorkstationAuditorSetup.exe`) is git-ignored to prevent repository bloat. You can obtain it in two ways:
-1. Download the latest installer from the **GitHub Releases** page and start using directly(hassle-free).
-
- OR
-
-2. Build the installer locally by running the build script: `.\scripts\build-installer.ps1` (see Option C below).
+1. Download the latest installer from the **GitHub Releases** page and start using directly (hassle-free).
+2. Build the installer locally by running the build script: `.\scripts\build-installer.ps1` (see instructions below).
 
 **Installation Steps:**
-1. Run the installer to set up the dashboard.
-   *Note: Since the installer is unsigned, Windows **Smart App Control** or SmartScreen may block it. Make sure to disable Smart App Control (or select "More info" -> "Run anyway") to proceed.*
-2. The installer automatically configures the current user's PowerShell execution policy to `RemoteSigned` (allowing the background collector scripts to run).
-3. Launch **Developer Workstation Auditor** from your desktop or Start menu and click **▶ Run Audit** to update the diagnostics.
+1. Make sure to disable **Smart App Control** (or select "More info" -> "Run anyway" if SmartScreen pops up) to proceed, since the installer is unsigned.
+2. Run the installer to set up the dashboard.
+3. The installer automatically configures the current user's PowerShell execution policy to `RemoteSigned` (allowing the background collector scripts to run).
+4. Launch **Developer Workstation Auditor** from your desktop or Start menu and click **▶ Run Audit** to update the diagnostics.
 
-### Option B — Run from Source (Recommended for Developers)
+### Run from Source (Recommended for Developers)
 Ensure you have [.NET SDK 10.0](https://dotnet.microsoft.com/download) installed.
 
 ```powershell
@@ -57,7 +54,7 @@ dotnet run --project Auditor.UI/Auditor.UI.csproj
 
 *Note: The UI dashboard will automatically trigger data collection and analysis on first launch if no report files exist, or whenever you click **▶ Run Audit**.*
 
-### Option C — Build and Package Locally
+### Build and Package Locally
 *   **Publish Single-File EXE:**
     ```powershell
     .\scripts\publish-windows.ps1 -Runtime win-x64 -Configuration Release
