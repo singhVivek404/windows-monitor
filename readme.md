@@ -48,17 +48,11 @@ The compiled installer executable (`WorkstationAuditorSetup.exe`) is git-ignored
 Ensure you have [.NET SDK 10.0](https://dotnet.microsoft.com/download) installed.
 
 ```powershell
-# 1. Collect system metrics (saves raw state in Data/*.json)
-powershell -NoProfile -ExecutionPolicy Bypass -File .\AuditCollector.ps1
-
-# 2. Run the C# analyzer engine (generates Reports/report.json)
-dotnet run --project Auditor/Auditor.csproj
-
-# 3. Launch the WinForms GUI Dashboard
+# Launch the WinForms GUI Dashboard (triggers data collection & analysis automatically)
 dotnet run --project Auditor.UI/Auditor.UI.csproj
 ```
 
-*Note: The UI dashboard will automatically trigger steps 1 and 2 on first startup if no report files exist.*
+*Note: The UI dashboard will automatically trigger data collection and analysis on first launch if no report files exist, or whenever you click **▶ Run Audit**.*
 
 ### Option C — Build and Package Locally
 *   **Publish Single-File EXE:**

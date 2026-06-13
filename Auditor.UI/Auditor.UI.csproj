@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Auditor\Auditor.csproj" />
+    <EmbeddedResource Include="..\*.ps1" Link="Resources\%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

@@ -65,8 +65,10 @@ namespace WorkstationAuditor
                 var outDir     = reportsDir ?? FindReportsDir();
                 if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
                 var reportPath = Path.GetFullPath(Path.Combine(outDir, "report.json"));
+                var tempPath   = reportPath + ".tmp";
                 var opts       = new JsonSerializerOptions { WriteIndented = true, PropertyNameCaseInsensitive = true };
-                File.WriteAllText(reportPath, JsonSerializer.Serialize(report, opts));
+                File.WriteAllText(tempPath, JsonSerializer.Serialize(report, opts));
+                File.Move(tempPath, reportPath, overwrite: true);
                 log?.Invoke($"Report written: {reportPath}");
                 return 0;
             }

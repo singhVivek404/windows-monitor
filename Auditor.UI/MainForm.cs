@@ -76,6 +76,7 @@ namespace WorkstationAuditor.UI
         public MainForm()
         {
             SuspendLayout();
+            EnsureCollectorsExtracted();
 
             Text          = "Developer Workstation Auditor";
             Size          = new Size(980, 700);
@@ -1133,6 +1134,15 @@ namespace WorkstationAuditor.UI
                 var psPath = FindFileInParents("AuditCollector.ps1");
                 if (psPath == null)
                 {
+                    var appDataPath = Path.Combine(GetAppDataBase(), "AuditCollector.ps1");
+                    if (File.Exists(appDataPath))
+                    {
+                        psPath = appDataPath;
+                    }
+                }
+
+                if (psPath == null)
+                {
                     AppendLog("AuditCollector.ps1 not found — will analyze existing Data/ if present.");
                 }
                 else
@@ -1284,6 +1294,47 @@ namespace WorkstationAuditor.UI
                 return dir;
             }
             catch { return AppDomain.CurrentDomain.BaseDirectory; }
+        }
+
+        private void EnsureCollectorsExtracted()
+        {
+            try
+            {
+                var targetDir = GetAppDataBase();
+                var assembly = typeof(MainForm).Assembly;
+                var resourceNames = assembly.GetManifestResourceNames();
+
+                foreach (var resName in resourceNames)
+                {
+                    if (resName.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string fileName = resName;
+                        int resIndex = resName.IndexOf("Resources.", StringComparison.OrdinalIgnoreCase);
+                        if (resIndex >= 0)
+                        {
+                            fileName = resName.Substring(resIndex + "Resources.".Length);
+                        }
+                        else
+                        {
+                            int lastDot = resName.LastIndexOf('.', resName.Length - 5);
+                            if (lastDot >= 0) fileName = resName.Substring(lastDot + 1);
+                        }
+
+                        var destPath = Path.Combine(targetDir, fileName);
+
+                        using var stream = assembly.GetManifestResourceStream(resName);
+                        if (stream != null)
+                        {
+                            using var destStream = File.Create(destPath);
+                            stream.CopyTo(destStream);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog("Failed to extract embedded collectors: " + ex.Message);
+            }
         }
 
         private string? FindRepositoryRoot()
