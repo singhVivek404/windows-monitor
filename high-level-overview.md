@@ -1,65 +1,84 @@
-# Workstation Auditor — High-Level Overview
+# Workstation Auditor: High-Level Overview
 
-This document provides a high-level conceptual overview of the **Developer Workstation Auditor** project, its architecture, design principles, orchestration, and component responsibilities.
+Welcome to the Workstation Auditor project! As a developer or system administrator, understanding *how* a system works at a high level is just as important as knowing how to code it. Think of this document as your map to the project. We won't get bogged down in every line of code yet—instead, we're going to look at the big picture. 
 
----
+Imagine you need to diagnose a problem on a developer's machine. You need data (telemetry), you need to analyze that data (backend), and you need to show the results to the user clearly (frontend). This project does exactly that.
 
-## 1. Project Overview & System Design
-
-The Workstation Auditor is a lightweight developer-focused system diagnostics application designed specifically for Windows. Unlike generic system utilities, it targets developer-centric resource hogs and environmental issues: virtual disk accumulation in WSL2, background compiler process leaks, unchecked package cache directories, Docker resources, and Windows registry limits (like long paths).
-
-The system architecture is strictly **decoupled and modular**, dividing the execution into four stages:
-
-```mermaid
-graph TD
-    subgraph Data Gathering (PowerShell)
-        A[AuditCollector.ps1] -->|Triggers in Parallel| B[Collector-*.ps1 Scripts]
-        B -->|Write Raw Telemetry| C[Data/*.json State Files]
-    end
-
-    subgraph Analytical Engine (C# Library)
-        C -->|Load & Parse| D[JsonLoader]
-        D -->|Evaluate Thresholds| E[HealthAnalyzer]
-        E -->|Atomically Write| F[Reports/report.json]
-    end
-
-    subgraph User Interface (WinForms)
-        F -->|FileSystemWatcher Trigger| G[MainForm Dashboard]
-        G -->|Action Trigger| H[System Actions / Process Kill]
-        H -->|Rerun diagnostics| A
-    end
-```
-
-### Architectural Design Principles
-
-1.  **Decoupled Collection and Analysis:** Data collection is performed by lightweight PowerShell scripts that run asynchronously. The analysis engine and the UI consume these text files, ensuring that data gathering can be run independently of the UI (e.g., in a CI environment or via Task Scheduler).
-2.  **Stateless C# Analyzer:** The C# backend is stateless. It reads JSON files representing the current snapshot of the machine, applies rule logic, computes a health score, and writes a single report file. This makes testing business rules simple.
-3.  **Event-Driven UI:** The WinForms dashboard utilizes a `FileSystemWatcher` on the report directory. The UI automatically invalidates its drawings and redraws elements whenever a new `report.json` is completed, ensuring real-time responsiveness without busy-waiting.
-4.  **DPI-Aware & Responsive Layouts:** Using native layouts (`TableLayoutPanel` and `FlowLayoutPanel` with text wrapping) instead of static absolute positioning ensures that text elements never overlap, regardless of resolution or system scaling (e.g., 125% or 150%).
-5.  **Self-Contained Portability:** The compiler scripts are embedded directly inside the C# binary as embedded resources. When run outside the repository, the app extracts the scripts into the user's writable Local AppData folder (`%LOCALAPPDATA%\WorkstationAuditor`).
+Let's break down the architecture, design, orchestration, and workflow, step-by-step.
 
 ---
 
-## 2. Components & Their Purpose
+## 1. Architecture: The Decoupled Approach
 
-Here is a map of the core files in the project and what each is responsible for:
+When designing a system that collects system-level data and displays it in a UI, a common mistake is to try and do everything in one place. If the UI thread is busy querying the Windows Registry or scanning the disk, the whole application freezes.
 
-| Component | Path | Purpose |
-|---|---|---|
-| **Collector Orchestrator** | `AuditCollector.ps1` | Parallel execution runner that invokes all individual collector scripts and passes parameters (e.g. output directory). |
-| **System Info Collector** | `Collector-Machine.ps1` | Queries CIM/WMI to pull core CPU names, exact RAM capacities, OS caption, and Last Boot time. |
-| **Processes Collector** | `Collector-Processes.ps1` | Grabs the current process list, measuring memory and CPU footprint, sorted to return the top 50. |
-| **Disk Collector** | `Collector-Disk.ps1` | Scans local logical disks to determine partition names, sizes, and free percentages. |
-| **Services Collector** | `Collector-Services.ps1` | Lists critical background Windows services, their start statuses, and configurations. |
-| **Startup Collector** | `Collector-Startup.ps1` | Queries the registry (HKLM and HKCU) and the local Start Menu folders to audit startup items. |
-| **Network Collector** | `Collector-Network.ps1` | Lists established and listening TCP connections, mapping owning process IDs to their process names. |
-| **Software Collector** | `Collector-Software.ps1` | Collects installed programs from standard registry uninstall keys (32-bit and 64-bit hives). |
-| **Dev Environment Collector** | `Collector-DevEnv.ps1` | Scans developer-specific indicators: WSL2 distributions, Docker image/container states, sizes of npm/NuGet/pip/Cargo caches, PATH variables, and the `LongPathsEnabled` registry key. |
-| **C# Models Project** | `Auditor/Models/` | Houses plain C# classes (`DiskInfo`, `MachineInfo`, `ProcessInfo`, `DevEnvironmentInfo`) that mirror the collector JSON schemas. |
-| **C# JSON Loader** | `Auditor/Services/JsonLoader.cs` | Deserializes the raw output files from the collector, handling parse errors and directing warnings to the log. |
-| **C# Analysis Engine** | `Auditor/Services/HealthAnalyzer.cs` | Runs threshold evaluation rules, deducts health scores, and returns warnings and recommendations. |
-| **In-Process Runner** | `Auditor/AuditorRunner.cs` | Orchestrates the loader and analyzer, saving the final `report.json` atomically. |
-| **WinForms UI** | `Auditor.UI/MainForm.cs` | A modern dark-themed dashboard displaying warnings, responsive recommendations, running processes, disks (scrollable), network connections, and developer environment info. Exposes custom controls to kill processes, shut down WSL, and prune Docker containers. |
-| **Workflow Pipeline** | `.github/workflows/release.yml` | GitHub Actions CI/CD configuration to compile, package with Inno Setup, and release the installer on version tag tags. |
-| **Inno Setup Script** | `installer/setup.iss` | Script code that defines the installer UI, file installations, shortcuts, and Registry updates for PowerShell permissions. |
-| **Packaging Helpers** | `scripts/` | Shell helper files to compile self-contained binaries (`publish-windows.ps1`) and compile installers (`build-installer.ps1`). |
+**Concept: Decoupling**
+To avoid freezing and to keep things clean, we use a **Decoupled Architecture**. We separate the "Data Collection" from the "Data Analysis and Display". 
+
+Here is our pipeline:
+1. **PowerShell (Telemetry Collection):** PowerShell is incredibly powerful for querying Windows OS details. We use it to gather raw data.
+2. **JSON Files (The Bridge):** The PowerShell scripts save the gathered data into standard JSON files. JSON acts as a universal language between our scripts and our application.
+3. **C# .NET Backend (Analysis):** The C# application reads the JSON files, analyzes the data against certain health rules, and prepares the results.
+4. **WinForms UI (Frontend):** Finally, the C# UI layer takes the analyzed results and displays them beautifully to the user.
+
+By communicating through JSON files, the PowerShell scripts and the C# application never have to wait on each other directly.
+
+---
+
+## 2. Orchestration and Workflow: How It Runs
+
+How does everything start? What happens when a user double-clicks the application? 
+
+**Concept: Self-Contained Deployment**
+We want the user to have a seamless experience. They shouldn't have to worry about putting scripts in the right folders. The application is compiled as a **Single-File EXE**. 
+
+Here is the exact workflow:
+
+### Step A: Bootstrapping and Extraction
+1. **Launch:** The user runs the `Auditor.UI` executable.
+2. **Extraction:** The C# application has all the PowerShell scripts bundled inside it as *Embedded Resources*. When it starts, it automatically extracts these scripts to the user's `%LOCALAPPDATA%\WindowsMonitor` folder. This ensures the scripts are always available and don't clutter the user's current directory.
+
+### Step B: Execution and Telemetry
+3. **Execution:** The C# application orchestrates the PowerShell execution by running the main `AuditCollector.ps1` script in the background.
+4. **Collection:** The `AuditCollector.ps1` script calls various specialized collectors (e.g., Disk, Network, DevEnv) which gather data and write it out to JSON reports in a `Reports/` directory.
+
+### Step C: Reactivity and Analysis
+5. **Debouncing & File Watching:** The C# backend uses a `FileSystemWatcher` to monitor the `Reports/` folder. Every time a PowerShell script finishes writing a JSON file, the C# backend is notified.
+   - *Concept: Debouncing.* If 10 files are written in one second, we don't want to refresh the UI 10 times. We use a technique called "debouncing" (via `Task.Delay`) to wait until the flurry of updates settles, and then we refresh the UI just once.
+6. **Analysis:** The `HealthAnalyzer` component kicks in, evaluating the data (e.g., "Is the disk almost full?", "Are there unauthorized startup apps?").
+
+### Step D: Presentation
+7. **UI Update:** The WinForms UI reads the analysis and renders the data onto the screen using dynamic layouts.
+
+---
+
+## 3. Components and Their Purpose
+
+Let's look at the major building blocks of the project:
+
+### 1. The PowerShell Collectors (`Collector-*.ps1`)
+**Purpose:** These are the workers. Each script has one specific job (e.g., `Collector-Disk.ps1` only looks at drives, `Collector-Network.ps1` only looks at IP addresses and adapters). 
+**Why?** *Separation of Concerns*. If we want to add a new feature to check Docker containers, we just add a new `Collector-Docker.ps1` script instead of modifying a massive, thousands-of-lines-long script.
+
+### 2. The Orchestrator Script (`AuditCollector.ps1`)
+**Purpose:** The manager of the collectors. It ensures all the individual `Collector-*.ps1` scripts run smoothly and standardizes where they output their JSON files.
+
+### 3. The Auditor Class Library (`Auditor/`)
+**Purpose:** This is the brain of the C# application. It handles parsing the JSON files, analyzing the health status (the `HealthAnalyzer`), and managing file paths. 
+**Why a Class Library?** We separated this from the UI project. This means if we ever want to build a web interface or a command-line version of this tool in the future, we can reuse this exact library without dragging along any WinForms UI code.
+
+### 4. The UI Frontend (`Auditor.UI/`)
+**Purpose:** The face of the application. It provides the visual dashboard for the user. It handles the `FileSystemWatcher`, triggers the PowerShell execution, and uses smart layout techniques (like `TableLayoutPanel`) to ensure it looks good on any monitor size.
+
+### 5. Deployment Automation (`.github/workflows` & Inno Setup)
+**Purpose:** To make the application easy to distribute. The GitHub Actions pipeline automatically compiles the C# code, bundles the single-file executable, and runs the Inno Setup script to create a professional `.exe` installer. It handles the messy parts of deployment so the developers don't have to.
+
+---
+
+## Summary for the Student
+
+At its core, this project is a **pipeline**: `Data Collection -> Data Storage (JSON) -> Data Analysis -> Visual Display`. 
+
+We prioritize making the tool completely self-contained for the end-user while keeping the codebase highly modular (decoupled) for us developers. 
+
+In the `deep-dive.md` document, we will look under the hood and examine the specific technical challenges we solved, such as Race Conditions, High-DPI Scaling, and background threading.

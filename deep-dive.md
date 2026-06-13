@@ -1,165 +1,85 @@
-# Workstation Auditor — Technical Deep Dive
+# Workstation Auditor: Deep Dive & Technical Internals
 
-This document details the code implementations, scripting techniques, C# backend architecture, WinForms UI mechanics, and build automation pipelines in the Workstation Auditor project.
+Welcome to the Deep Dive. This document is designed to take you under the hood of the Workstation Auditor. As developers, we don't just want to know *what* the code does; we need to know *why* it was written that way. We'll explore the specific design patterns, concurrency challenges, and automation strategies used in this project.
 
----
-
-## 1. PowerShell Diagnostics Collectors
-
-Data collection is written in PowerShell. The script suite queries WMI/CIM, checks registry hives, scans directory profiles, and runs external CLI tools.
-
-### `AuditCollector.ps1` (Orchestration Runner)
-*   **Purpose:** Coordinates running the other collector scripts in parallel.
-*   **Mechanism:** Resolves the script directory using `$PSScriptRoot`. It takes a parameter `-OutputDir` (defaulting to `.\Data`) and runs each `Collector-*.ps1` script as a separate PowerShell background job or execution process. This prevents slow individual scripts (like registry scanners) from blocking fast ones.
-
-### `Collector-Machine.ps1` (System Capacity Telemetry)
-*   **Query Method:** Sourced via WMI/CIM cmdlets (`Get-CimInstance`).
-*   **Metrics Sourced:**
-    *   **RAM:** `Win32_ComputerSystem.TotalPhysicalMemory` (total capacity) and `Win32_OperatingSystem.FreePhysicalMemory` (free physical RAM). Sourcing the free RAM directly from the OS provides kernel-level accuracy (which accounts for file system cache, kernel stacks, and device drivers), unlike summing process working sets.
-    *   **CPU:** `Win32_Processor` details (name, core count, logical threads).
-    *   **Uptime:** `Win32_OperatingSystem.LastBootUpTime` is captured to compute total uptime.
-
-### `Collector-Processes.ps1` (Process Memory Map)
-*   **Mechanism:** Calls `Get-Process | Sort-Object -Property WorkingSet -Descending | Select-Object -First 50`.
-*   **Metrics Sourced:** Processes are mapped to their ProcessName, PID, CPU Usage, and Working Set (converted to MB).
-
-### `Collector-Disk.ps1` (Physical Space Metrics)
-*   **Mechanism:** Queries `Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"` (DriveType 3 represents fixed local disks, preventing mapped network drives or removable USBs from blocking queries).
-*   **Metrics Sourced:** Letter drive identifiers, total sizes, free space, and used percentages.
-
-### `Collector-Network.ps1` (O(1) Socket Mapping)
-*   **Optimization:** Maps established/listening connections to process names. 
-*   **Code Implementation:**
-    ```powershell
-    # Builds a process-to-name dictionary ONCE (O(N) lookup complexity)
-    $procMap = @{}
-    Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
-        if (-not $procMap.ContainsKey($_.Id)) { $procMap[$_.Id] = $_.ProcessName }
-    }
-    
-    # Resolves connection stats
-    Get-NetTCPConnection -ErrorAction SilentlyContinue | ForEach-Object {
-        $procName = $procMap[[int]$_.OwningProcess] # O(1) dictionary key fetch
-        # Adds to outputs...
-    }
-    ```
-*   **Alternative Fallback:** If `Get-NetTCPConnection` is not available (older OS versions), it parses the command output of `netstat -ano` using regular expressions, looking up the resolved PIDs in the same pre-built hash dictionary.
-
-### `Collector-DevEnv.ps1` (Developer Environment Auditor)
-The dev environment script compiles developer-specific resource telemetry:
-1.  **WSL2 Disk Check:** Executes `wsl.exe --list --verbose` to find distributions, then queries the registry path `HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss` to resolve the absolute path of the `ext4.vhdx` virtual hard disks. It measures their sizes on disk to audit virtual disk growth.
-2.  **Docker Metrics:** Executes `docker info` and parses JSON output from `docker container ls -a --format json` and `docker image ls --format json` to count pulled images and containers.
-3.  **Package Cache Audit:** Scans standard development package storage directories:
-    *   `NuGet`: `%UserProfile%\.nuget\packages`
-    *   `npm`: `%AppData%\npm-cache`
-    *   `pip`: `%LocalAppData%\pip\Cache`
-    *   `Cargo`: `%UserProfile%\.cargo\registry\cache`
-    *   `pnpm`: `%LocalAppData%\pnpm\store`
-    *   `Gradle`: `%UserProfile%\.gradle\caches`
-    Returns directory sizes in GB by summing file capacities.
-4.  **PATH Variables & Long Paths:** Counts characters in the `$env:PATH` string. It also checks the Windows registry key `HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled` to warn when the 260-character path limit is still active.
+Grab a coffee, and let's get technical.
 
 ---
 
-## 2. C# Core Backend Library (`Auditor`)
+## 1. Technical Concepts & Challenges
 
-The backend library performs model bindings, JSON schema validation, and health score logic.
+Before we look at the specific code, you need to understand three core technical concepts that shaped this project.
 
-### JSON Loader Engine (`JsonLoader.cs`)
-*   **Functionality:** Exposes `LoadSingle<T>` and `LoadMany<T>` helpers.
-*   **Error Handling:** It encapsulates JSON deserialization within `try-catch` blocks catching `JsonException`. Rather than throwing silently or crashing the application, it writes the parse error details to the logging delegate (`_log`) and returns the `default` value or an empty enumeration, allowing the remaining collectors to display.
+### Concept A: The Race Condition & Atomic Writes
+**The Problem:** Our PowerShell scripts write data to JSON files, and our C# application uses a `FileSystemWatcher` to detect when those files are created so it can parse them. However, writing a file to disk isn't instantaneous. If C# tries to read the file while PowerShell is still halfway through writing it, C# will crash with a "JSON Parsing Error" or an "Access Denied" error. This is a classic **Race Condition**.
+**The Solution:** Atomic Writes. In our PowerShell scripts, we don't write directly to `report.json`. Instead, we write all the data to a temporary file: `report.tmp`. Once the write is 100% complete, we rename the file from `.tmp` to `.json`. 
+*Why does this work?* In Windows, renaming a file on the same drive is an **Atomic Operation**. It happens instantly at the file-system level. The C# `FileSystemWatcher` is configured to only look for `.json` files. Therefore, C# is completely blind to the file until it is perfectly, completely ready.
 
-### Health Analysis Engine (`HealthAnalyzer.cs`)
-*   **Rules Engine:** It evaluates snapshots against critical thresholds:
-    *   *Disk Critical:* Used space >= 95% (-20 pts).
-    *   *Disk Warning:* Used space >= 80% (-10 pts).
-    *   *RAM Critical:* Sourced via kernel free RAM >= 90% (-20 pts).
-    *   *RAM Warning:* Sourced via kernel free RAM >= 70% (-10 pts).
-    *   *Startup Programs:* Count >= 20 (-15 pts); count > 10 (-5 pts).
-    *   *Long Uptime:* Windows boot time > 14 days (-5 pts).
-    *   *WSL2 Bloat:* Combined WSL2 vhdx files > 50 GB (Medium warning, -5 pts).
-    *   *Cache Bloat:* Combined package caches > 10 GB (Low warning, -3 pts).
-    *   *Orphaned Build Processes:* Orphaned tools counts >= 3 (-3 pts).
-*   **Recommendation Matrix:** Maps warning categories to specific strings containing recommended actions. These strings are parsed by the UI to register automated click triggers (e.g. launching `taskmgr` or `cleanmgr.exe`).
+### Concept B: Embedded Resources & Portability
+**The Problem:** The tool relies on a bunch of `.ps1` scripts. If we just zip the executable and the scripts together, the user has to extract them to a folder, and if they accidentally move the executable away from the scripts, the program breaks.
+**The Solution:** We embed the PowerShell scripts directly inside the C# executable at compile time (using `<EmbeddedResource>`). When the application starts, it silently extracts these scripts to `%LOCALAPPDATA%\WindowsMonitor`. 
+*Why does this work?* It guarantees that the executable is 100% portable. The user gets a single `.exe` file. They can run it from their Desktop, from a USB drive, anywhere—and the application handles setting up its own dependencies behind the scenes.
 
-### Analytical Orchestrator (`AuditorRunner.cs`)
-*   **Method:** Calls `JsonLoader` to build collection objects, passes them to `HealthAnalyzer`, and formats a structured payload containing the machine info, logs, analysis warnings, recommendations, and dev environment findings.
-*   **Atomic Write Pattern:** To prevent read/write conflicts with the UI's filesystem monitoring thread, it writes the report file atomically:
-    ```csharp
-    var tempPath = reportPath + ".tmp";
-    File.WriteAllText(tempPath, JsonSerializer.Serialize(report, opts));
-    File.Move(tempPath, reportPath, overwrite: true); // Atomic rename/replace operation
-    ```
+### Concept C: Debouncing the UI Thread
+**The Problem:** When the PowerShell orchestrator runs, it might generate 8 JSON files in a fraction of a second. If the UI responds to every single file creation event and attempts to redraw the entire screen 8 times a second, the application will freeze and lock up the UI Thread.
+**The Solution:** Debouncing. We introduce a deliberate delay using `Task.Delay` and a `CancellationToken`. When the first file arrives, we start a countdown timer (e.g., 500 milliseconds). If another file arrives before the timer hits zero, we reset the timer. We only redraw the UI when the system has been "quiet" long enough for the timer to reach zero. This ensures a smooth, single update to the UI.
 
 ---
 
-## 3. C# WinForms Frontend Dashboard (`Auditor.UI`)
+## 2. PowerShell Scripts (`scripts/`)
 
-The UI dashboard is written using C# Windows Forms.
+The PowerShell scripts are the "sensors" of our application. They interact directly with the Windows Management Instrumentation (WMI) and the Registry.
 
-### DPI-Aware Responsive Layouts
-To ensure layout components fit on various resolution ratios and high-DPI scaling configurations:
-1.  **Grid Alignments:** Rather than manual coordinates, the top panel header and overview panels are housed inside a `TableLayoutPanel` using relative percentage widths (e.g., 60% left column / 40% right column). Row heights are set to `SizeType.AutoSize` or `SizeType.Percent` to dynamically space elements.
-2.  **Dynamic Card Auto-Sizing:** The flow layout panel `flpRecs` (Recommendations list) exposes a `Resize` handler that updates card widths when the window scales:
-    ```csharp
-    flpRecs.Resize += (s, e) => {
-        int w = flpRecs.ClientSize.Width - 20;
-        foreach (Control c in flpRecs.Controls) {
-            if (c is Panel card) {
-                card.Width = w;
-                foreach (Control sub in card.Controls) {
-                    if (sub is Label) sub.Width = card.Width - 108;
-                    else if (sub is Button) sub.Left = card.Width - 92;
-                }
-            }
-        }
-    };
-    ```
-3.  **Button wrapping:** The bottom button panel `pnlButtons` has `WrapContents = true` and `AutoSize = true` with `AutoSizeMode.GrowAndShrink`. If the user shrinks the dashboard width, the buttons wrap onto new lines, automatically growing the height of the button bar.
+* **`AuditCollector.ps1` (The Orchestrator):** This is the master script. It creates the `Reports` directory and then executes all the individual collectors below. It's responsible for the overall execution flow on the PowerShell side.
+* **`Collector-DevEnv.ps1`:** Highly specific to developers. It checks the system `PATH` for tools like Git, Node.js, and Python, verifies their versions, and checks environment variables.
+* **`Collector-Disk.ps1`:** Uses `Get-CimInstance Win32_LogicalDisk` to find physical drives and calculate free space percentages.
+* **`Collector-Machine.ps1`:** Gathers the base hardware and OS specs (CPU, RAM, OS Version).
+* **`Collector-Network.ps1`:** Queries IP addresses, DNS configurations, and active adapters.
+* **`Collector-Processes.ps1` & `Collector-Services.ps1`:** Snapshots what is currently running on the machine, looking for resource hogs or stopped critical services.
+* **`Collector-Software.ps1`:** Dives into the Windows Registry (both 32-bit and 64-bit hives) to list installed applications.
+* **`Collector-Startup.ps1`:** Checks the `Run` keys in the registry to see what applications are configured to start automatically when the user logs in.
 
-### Embedded Resources Extraction Pipeline
-To ensure the published single-file EXE (`Auditor.UI.exe`) is self-contained:
-*   The project file [Auditor.UI.csproj](file:///d:/windows-monitor/Auditor.UI/Auditor.UI.csproj) links the root-level scripts as embedded resources:
-    ```xml
-    <EmbeddedResource Include="..\*.ps1" Link="Resources\%(Filename)%(Extension)" />
-    ```
-*   On startup, `MainForm` runs `EnsureCollectorsExtracted()`. This method calls `Assembly.GetManifestResourceNames()`, identifies resources ending in `.ps1`, and writes them to `%LOCALAPPDATA%\WorkstationAuditor\` using `File.Create()` and `stream.CopyTo()`.
-*   If `RunFullAuditAsync()` fails to find the scripts in parent directories (production environment), it falls back to `%LOCALAPPDATA%\WorkstationAuditor\AuditCollector.ps1`.
-
-### Multithreaded Execution & Watcher Debouncing
-*   **PowerShell Invocations:** Background collection is run on a task thread using `await RunProcessAsync(psi, "Collector", 360_000)` ensuring the UI thread remains completely interactive and does not lock.
-*   **FileSystem Watcher:** File changes trigger the `FileSystemWatcher.Changed` event. To prevent parsing a partially written report, the event handler schedules a non-blocking `Task.Delay(350)` for debouncing before calling `RefreshReportAsync()`.
-*   **Asynchronous Report Loading:** File loading and retries are run off-thread via `Task.Run()`. Once the text is successfully read, `BeginInvoke` marshals the JSON document back to the main UI thread to update controls.
+*Notice the pattern?* Every script follows a strict rule: Gather data -> Convert to PSCustomObject -> Export to JSON (using the Atomic Write pattern).
 
 ---
 
-## 4. Build and Release Automation
+## 3. C# .NET Backend (`Auditor/`)
 
-The project automation handles self-contained builds, installer compiling, and GitHub tag releases.
+This is a Class Library (`.dll`), meaning it contains no visual elements. It is purely focused on data and business logic.
 
-### Compile & Publish Scripts (`scripts/`)
-*   `publish-windows.ps1`: Invokes the dotnet publisher engine targeting Windows x64.
-    ```powershell
-    dotnet publish Auditor.UI/Auditor.UI.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:PublishTrimmed=false -o publish
-    ```
-    It then copies all raw `.ps1` collector scripts into the `publish/` output folder (where the single-file EXE expects them).
-*   `build-installer.ps1`: Locates the Inno Setup compiler executable (`ISCC.exe`) in standard paths (or environment overrides) and compiles the setup configuration script.
+* **The Models:** We have C# classes that mirror the structure of the JSON files. We use `System.Text.Json` to deserialize the JSON text into these strongly-typed C# objects.
+* **`AuditorRunner.cs`:** This class acts as the bridge to PowerShell. It sets up the `ProcessStartInfo`, configures the `ExecutionPolicy` to Bypass (so our scripts can run even on restricted machines), and captures the Standard Output and Error streams from the hidden PowerShell window.
+* **`HealthAnalyzer.cs`:** This is where the "Auditing" actually happens. It takes the parsed data and applies business rules. For example: *If Disk Free Space < 10%, set status to WARNING.* It generates human-readable recommendations based on the raw data.
 
-### Inno Setup Installer (`installer/setup.iss`)
-*   Packages the self-contained executable and PowerShell scripts into a compressed setup installer `WorkstationAuditorSetup.exe` inside the `dist/` directory.
-*   **Registry Modification:** Writes to the registry hive:
-    `Root: HKCU; Subkey: "Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell"; ValueName: "ExecutionPolicy"; ValueData: "RemoteSigned";`
-    This ensures PowerShell script collectors have permission to execute on the end user's machine without requiring manual console configuration.
+---
 
-### GitHub Actions Pipeline (`release.yml`)
-Located at `.github/workflows/release.yml`, it automates releases on GitHub:
-1.  **Triggers:** Runs on manual execution (`workflow_dispatch`) or whenever a version tag like `v*` is pushed.
-2.  **Workflow Steps:**
-    *   Spawns a standard Windows runner (`runs-on: windows-latest`).
-    *   Installs **.NET 10 SDK**.
-    *   Invokes `publish-windows.ps1` to produce the single-file publish artifacts.
-    *   Runs the pre-installed Inno Setup compiler (`ISCC.exe`) against `installer/setup.iss` to package the setup installer.
-    *   Uses the `softprops/action-gh-release@v2` action to create a GitHub Release and upload `dist/WorkstationAuditorSetup.exe` as a release asset.
-3.  **Ternary Fallback Logic:** 
-    `tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}`
-    Ensures manual pipeline runs fallback to publishing a rolling prerelease release under the tag **`latest`**, while version tag pushes publish to matching tag version paths.
+## 4. C# Frontend (`Auditor.UI/`)
+
+This is the WinForms application that the user interacts with.
+
+* **`MainForm.cs`:** The core window. It registers the `FileSystemWatcher` and holds the debouncing logic we discussed earlier.
+* **High-DPI Scaling:** In older Windows apps, developers used absolute coordinates (e.g., "Put the button exactly at pixel 100x, 50y"). If a user has a 4K monitor and sets their Windows Scaling to 150%, absolute coordinates cause text to overlap and clip. 
+  * *How we solved it:* We use `TableLayoutPanel` and `FlowLayoutPanel`. These are dynamic containers. They arrange controls relative to each other (like an HTML grid or flexbox). If the text gets bigger, the container automatically stretches to accommodate it, ensuring the application looks perfect on any screen.
+* **RichTextBox Controls:** For data-heavy tabs (like installed software or environment variables), we use scrolling RichTextBoxes instead of standard Labels to ensure that massive amounts of text don't break out of the window boundaries.
+
+---
+
+## 5. Automation & CI/CD (`.github/workflows/release.yml`)
+
+We don't want to manually compile and zip the application every time we make a change. We use GitHub Actions to automate this.
+
+### The Pipeline Workflow:
+1. **Trigger:** The pipeline is triggered manually via `workflow_dispatch` or automatically when a new release tag is created.
+2. **Setup:** It spins up a fresh `windows-latest` virtual machine in the cloud.
+3. **Build:** It runs `dotnet publish` to compile the C# code in `Release` mode, creating our optimized, single-file executable.
+4. **Installer Creation (Inno Setup):** We don't just ship the `.exe`. We use a tool called Inno Setup. The pipeline takes our compiled `.exe` and packages it into a professional `WorkstationAuditorSetup.exe` installer.
+   * *Why an installer?* The Inno Setup script does more than just copy files. It can automatically execute administrative commands during installation, like permanently setting the PowerShell execution policy to `RemoteSigned`, fixing permission issues before the user even runs the app.
+5. **Release:** Finally, the `softprops/action-gh-release` step takes the generated setup file and attaches it to a GitHub Release, making it instantly available for users to download.
+
+---
+
+## Summary
+
+You now have a deep understanding of the Workstation Auditor. You understand the "Why" behind atomic writes, debounced UI threads, dynamic DPI layouts, and embedded resource extraction. 
+
+If you need to extend this project, follow the patterns established here: keep your scripts modular, use atomic JSON handoffs, keep business logic in the `Auditor` library, and rely on the pipeline for consistent deployments.
