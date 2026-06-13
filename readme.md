@@ -35,7 +35,10 @@ Standard diagnostics tools (like Windows Task Manager or Resource Monitor) only 
 
 ### Option A — Install via Windows Installer (Recommended for Users)
 The compiled installer executable (`WorkstationAuditorSetup.exe`) is git-ignored to prevent repository bloat. You can obtain it in two ways:
-1. Download the latest installer from the **GitHub Releases** page (once published).
+1. Download the latest installer from the **GitHub Releases** page and start using directly(hassle-free).
+
+ OR
+
 2. Build the installer locally by running the build script: `.\scripts\build-installer.ps1` (see Option C below).
 
 **Installation Steps:**
