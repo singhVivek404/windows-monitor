@@ -35,3 +35,6 @@ artifacts/
 
 # Misc
 *.log
+ 
+# Publish output
+publish/

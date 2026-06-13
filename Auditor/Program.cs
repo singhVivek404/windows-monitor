@@ -13,49 +13,7 @@ namespace WorkstationAuditor
         static int Main(string[] args)
         {
             string dataDir = args.Length > 0 ? args[0] : FindDataDir();
-            if (!Directory.Exists(dataDir))
-            {
-                Console.Error.WriteLine($"Data directory not found: {dataDir}");
-                return 1;
-            }
-
-            var loader = new JsonLoader(dataDir);
-
-            var machine = loader.LoadSingle<MachineInfo>("machine");
-            var processes = loader.LoadMany<ProcessInfo>("processes").ToList();
-            var services = loader.LoadMany<ServiceInfo>("services").ToList();
-            var startup = loader.LoadMany<StartupProgram>("startup").ToList();
-            var disks = loader.LoadMany<DiskInfo>("disk").ToList();
-            var software = loader.LoadMany<SoftwareInfo>("software").ToList();
-            var network = loader.LoadMany<NetworkConnection>("network").ToList();
-
-            Console.WriteLine($"Machine: {machine?.ComputerName ?? "(unknown)"}");
-            Console.WriteLine($"Processes: {processes.Count}, Services: {services.Count}, Startup: {startup.Count}, Disks: {disks.Count}, Software: {software.Count}, Network: {network.Count}");
-
-            var analyzer = new HealthAnalyzer();
-            var analysis = analyzer.Analyze(machine, processes, services, startup, disks);
-
-            var report = new
-            {
-                CollectedAt = DateTime.UtcNow,
-                Machine = machine,
-                Processes = processes,
-                Services = services,
-                Startup = startup,
-                Disks = disks,
-                Software = software,
-                Network = network,
-                Analysis = analysis
-            };
-
-            var reportsDir = FindReportsDir();
-            if (!Directory.Exists(reportsDir)) Directory.CreateDirectory(reportsDir);
-            var reportPath = Path.GetFullPath(Path.Combine(reportsDir, "report.json"));
-            var opts = new JsonSerializerOptions { WriteIndented = true, PropertyNameCaseInsensitive = true };
-            var json = JsonSerializer.Serialize(report, opts);
-            File.WriteAllText(reportPath, json);
-            Console.WriteLine($"Wrote report: {reportPath}");
-            return 0;
+            return AuditorRunner.Run(dataDir, null, s => Console.WriteLine(s));
         }
 
         static string FindDataDir()

@@ -61,3 +61,13 @@ Contributing
 - Open an issue or submit a PR. Keep generated data (`Data/`, `Reports/`) out of commits.
 
 License: MIT (or change to your preferred license)
+
+Create a double-clickable EXE
+-----------------------------
+To produce a single-file Windows EXE you can publish the UI project as a self-contained application. Run:
+
+```powershell
+.\scripts\publish-windows.ps1 -Runtime win-x64 -Configuration Release
+```
+
+The published executable will appear in the `publish` folder. Copy the EXE to any machine and double-click it to run the app (it includes the Auditor library since the UI references it). The app will auto-run the initial setup if no `Reports/report.json` exists.
