@@ -38,3 +38,6 @@ artifacts/
  
 # Publish output
 publish/
+
+# Installer output
+dist/

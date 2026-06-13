@@ -1,6 +1,6 @@
 <#
 AuditCollector.ps1
-Orchestrates data collection and writes JSON files to the Data folder.
+Orchestrates all data collectors and writes JSON files to the Data folder.
 #>
 
 param(
@@ -19,15 +19,25 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 Write-Host "Running collectors from $scriptDir -> $OutputDir"
 
-$collectors = @('Collector-Machine.ps1','Collector-Processes.ps1','Collector-Services.ps1','Collector-Startup.ps1','Collector-Disk.ps1','Collector-Software.ps1','Collector-Network.ps1')
+$collectors = @(
+    'Collector-Machine.ps1',
+    'Collector-Processes.ps1',
+    'Collector-Services.ps1',
+    'Collector-Startup.ps1',
+    'Collector-Disk.ps1',
+    'Collector-Software.ps1',
+    'Collector-Network.ps1',
+    'Collector-DevEnv.ps1'      # <-- NEW: developer environment audit
+)
+
 foreach ($c in $collectors) {
     $path = Join-Path $scriptDir $c
     if (Test-Path $path) {
         try {
-            & $path -OutputPath (Join-Path $OutputDir ($c -replace '^Collector-','' -replace '\.ps1$','.json'))
+            & $path -OutputPath (Join-Path $OutputDir ($c -replace '^Collector-', '' -replace '\.ps1$', '.json'))
         }
         catch {
-            Write-Error "Collector $c failed: $_"
+            Write-Warning "Collector $c failed: $_"
         }
     }
     else {

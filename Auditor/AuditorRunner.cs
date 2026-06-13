@@ -10,9 +10,16 @@ namespace WorkstationAuditor
 {
     public static class AuditorRunner
     {
-        // Run analysis using data in dataDir. Writes report into reportsDir (or auto-locates it).
-        // Optional log callback will be called with progress messages (may be invoked on a worker thread).
-        public static int Run(string dataDir, string? reportsDir = null, Action<string>? log = null)
+        /// <summary>
+        /// Loads collected JSON files from <paramref name="dataDir"/>, runs the
+        /// health analyzer, and writes a consolidated report.json to
+        /// <paramref name="reportsDir"/> (auto-discovered when null).
+        /// Returns 0 on success, non-zero on failure.
+        /// </summary>
+        public static int Run(
+            string          dataDir,
+            string?         reportsDir = null,
+            Action<string>? log        = null)
         {
             try
             {
@@ -23,42 +30,44 @@ namespace WorkstationAuditor
                 }
 
                 log?.Invoke("Loading collected JSON files...");
-                var loader = new JsonLoader(dataDir);
+                var loader = new JsonLoader(dataDir, log);   // log wired in to surface parse errors
 
-                var machine = loader.LoadSingle<MachineInfo>("machine");
+                var machine   = loader.LoadSingle<MachineInfo>("machine");
                 var processes = loader.LoadMany<ProcessInfo>("processes").ToList();
-                var services = loader.LoadMany<ServiceInfo>("services").ToList();
-                var startup = loader.LoadMany<StartupProgram>("startup").ToList();
-                var disks = loader.LoadMany<DiskInfo>("disk").ToList();
-                var software = loader.LoadMany<SoftwareInfo>("software").ToList();
-                var network = loader.LoadMany<NetworkConnection>("network").ToList();
+                var services  = loader.LoadMany<ServiceInfo>("services").ToList();
+                var startup   = loader.LoadMany<StartupProgram>("startup").ToList();
+                var disks     = loader.LoadMany<DiskInfo>("disk").ToList();
+                var software  = loader.LoadMany<SoftwareInfo>("software").ToList();
+                var network   = loader.LoadMany<NetworkConnection>("network").ToList();
+                var devEnv    = loader.LoadSingle<DevEnvironmentInfo>("devenv");   // NEW
 
-                log?.Invoke($"Loaded: machine={machine?.ComputerName ?? "(unknown)"}, processes={processes.Count}");
+                log?.Invoke($"Loaded: machine={machine?.ComputerName ?? "(unknown)"}, " +
+                            $"processes={processes.Count}, devEnv={devEnv != null}");
 
-                log?.Invoke("Analyzing...");
+                log?.Invoke("Running health analysis...");
                 var analyzer = new Services.HealthAnalyzer();
-                var analysis = analyzer.Analyze(machine, processes, services, startup, disks);
+                var analysis = analyzer.Analyze(machine, processes, services, startup, disks, devEnv);
 
                 var report = new
                 {
-                    CollectedAt = DateTime.UtcNow,
-                    Machine = machine,
-                    Processes = processes,
-                    Services = services,
-                    Startup = startup,
-                    Disks = disks,
-                    Software = software,
-                    Network = network,
-                    Analysis = analysis
+                    CollectedAt    = DateTime.UtcNow,
+                    Machine        = machine,
+                    Processes      = processes,
+                    Services       = services,
+                    Startup        = startup,
+                    Disks          = disks,
+                    Software       = software,
+                    Network        = network,
+                    DevEnvironment = devEnv,   // NEW: included in report for UI dev-tab
+                    Analysis       = analysis
                 };
 
-                var outDir = reportsDir ?? FindReportsDir();
+                var outDir     = reportsDir ?? FindReportsDir();
                 if (!Directory.Exists(outDir)) Directory.CreateDirectory(outDir);
                 var reportPath = Path.GetFullPath(Path.Combine(outDir, "report.json"));
-                var opts = new JsonSerializerOptions { WriteIndented = true, PropertyNameCaseInsensitive = true };
-                var json = JsonSerializer.Serialize(report, opts);
-                File.WriteAllText(reportPath, json);
-                log?.Invoke($"Wrote report: {reportPath}");
+                var opts       = new JsonSerializerOptions { WriteIndented = true, PropertyNameCaseInsensitive = true };
+                File.WriteAllText(reportPath, JsonSerializer.Serialize(report, opts));
+                log?.Invoke($"Report written: {reportPath}");
                 return 0;
             }
             catch (Exception ex)
@@ -68,15 +77,16 @@ namespace WorkstationAuditor
             }
         }
 
-        static string FindReportsDir()
+        // ───────────────────────────────────────────────────────────────────────
+        private static string FindReportsDir()
         {
             var cwd = Directory.GetCurrentDirectory();
             var candidates = new[]
             {
                 Path.Combine(cwd, "Reports"),
                 Path.Combine(cwd, "..", "Reports"),
-                Path.Combine(AppContext.BaseDirectory, "..", "Reports"),
-                Path.Combine(AppContext.BaseDirectory, "Reports")
+                Path.Combine(AppContext.BaseDirectory, "Reports"),
+                Path.Combine(AppContext.BaseDirectory, "..", "Reports")
             };
             foreach (var c in candidates)
             {
