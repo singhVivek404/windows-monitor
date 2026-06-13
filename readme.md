@@ -111,7 +111,3 @@ The data collection is performed by a set of lightweight PowerShell scripts:
 *   `build-installer.ps1` invokes the Inno Setup Compiler (`ISCC.exe`) to build a compressed Windows Installer payload, adding registry changes to configure user script execution privileges.
 
 ---
-
-## License
-
-MIT
